@@ -1,6 +1,6 @@
 # Building excellent websites — a guide for AI agents
 
-> **Status:** Draft 4 · 2026-09-24 · for use and iteration
+> **Status:** Draft 5 · 2026-09-24 · for use and iteration
 > **Audience:** agents building and maintaining websites, and the people delegating that work.
 > **Scope:** platform-neutral quality guidance; your platform's documentation governs its
 > authoring, publishing and recovery contracts.
@@ -299,140 +299,36 @@ public service; audit private previews locally.
 
 ### Set up once
 
-Needs Chrome and Node 22.19 or later (Lighthouse 13). The lockfile pins the versions; later
-sessions restore with `npm ci` so nothing moves mid-comparison. A project with pinned tooling uses
-its own.
+The scripts live beside this guide in its repository; fetch them with the guide. They need Chrome
+and Node 22.19 or later (Lighthouse 13), and the lockfile pins every version, so nothing moves
+mid-comparison. A project with pinned tooling uses its own.
 
 ```sh
-mkdir -p website-audit && cd website-audit
-[ -f package.json ] || npm init -y
-[ -f package-lock.json ] || npm install --save-dev --save-exact lighthouse playwright @axe-core/playwright
-npm ci
-npx playwright install chromium
+git clone --depth 1 https://github.com/cityofcode-io/agent-operated-websites.git website-audit
+cd website-audit && npm ci && npx playwright install chromium
 ```
+
+Run both scripts from that directory; they write to `reports/`.
 
 ### Run Lighthouse, three times per device
 
-Each invocation writes a new timestamped directory, so a rerun never overwrites the baseline. Set
-`audit_url` and `name` per matrix URL. Flags: [Lighthouse CLI](https://github.com/GoogleChrome/lighthouse).
-
-```sh
-set -eu
-audit_url='https://example.com/'
-name='home'
-out="reports/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p reports
-mkdir "$out"
-for run in 1 2 3; do
-  for device in mobile desktop; do
-    preset=''
-    [ "$device" = desktop ] && preset='--preset=desktop'
-    npx lighthouse "$audit_url" $preset --chrome-flags="--headless" \
-      --only-categories=performance,accessibility,best-practices,seo \
-      --output=json --output=html --output-path="$out/$name-$device-$run" \
-      --no-enable-error-reporting --quiet || echo "failed: $name-$device-$run"
-  done
-done
-node medians.mjs "$out"
-```
-
-Save as `medians.mjs`. An empty directory, a runtime error, a missing score or a group without
-exactly three runs — a failed invocation included — is an error, never a pass. Scores are stored
-with two decimals, so rounding the × 100 removes float noise and rounds nothing up.
-
-```js
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
-const dir = process.argv[2];
-if (!dir) throw new Error('Usage: node medians.mjs <report-directory>');
-const CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
-const groups = {};
-for (const file of (await readdir(dir)).filter(f => f.endsWith('.report.json')).sort()) {
-  const report = JSON.parse(await readFile(join(dir, file), 'utf8'));
-  const group = file.replace(/-\d+\.report\.json$/, '');
-  if (report.runtimeError) throw new Error(`${file}: ${report.runtimeError.message}`);
-  for (const id of CATEGORIES) {
-    const score = report.categories?.[id]?.score;
-    if (!Number.isFinite(score)) throw new Error(`${file}: ${id} has no score`);
-    ((groups[group] ??= {})[id] ??= []).push(Math.round(score * 100));
-  }
-}
-if (!Object.keys(groups).length) throw new Error(`${dir}: no reports`);
-for (const [group, categories] of Object.entries(groups)) {
-  for (const [id, scores] of Object.entries(categories)) {
-    scores.sort((a, b) => a - b);
-    if (scores.length !== 3) throw new Error(`${group}: ${scores.length} runs, expected 3`);
-    console.log(`${group} ${id}: median ${scores[1]} [${scores[0]}–${scores[2]}]`);
-  }
-}
-```
-
-It prints one line per device and category — `home-mobile performance: median 100 [99–100]`.
-For diagnosis read `audits` and their `details`, `runWarnings` and the manual checks in the same
-files.
+`./lighthouse.sh <url> [name]`, once per matrix URL. Each run writes a new timestamped directory,
+so a rerun never overwrites the baseline, then prints one median line per device and category —
+`home-mobile performance: median 100 [99–100]`. An empty directory, a runtime error, a missing
+score or a group without exactly three runs — a failed invocation included — is an error, never
+a pass. Flags: [Lighthouse CLI](https://github.com/GoogleChrome/lighthouse). For diagnosis read
+`audits` and their `details`, `runWarnings` and the manual checks in the saved JSON.
 
 ### Check the rendered page
 
-Save as `check-page.mjs`:
-
-```js
-import { chromium } from 'playwright';
-import AxeBuilder from '@axe-core/playwright';
-import { mkdir, writeFile } from 'node:fs/promises';
-
-const [url, name = 'page', dir = 'reports'] = process.argv.slice(2);
-if (!url) throw new Error('Usage: node check-page.mjs <url> [name] [report-directory]');
-const origin = new URL(url).origin;
-await mkdir(dir, { recursive: true });
-const browser = await chromium.launch();
-let failed = false;
-try {
-  for (const width of [390, 1440]) {
-    const context = await browser.newContext({ viewport: { width, height: 844 } });
-    const page = await context.newPage();
-    const errors = [];
-    page.on('pageerror', error => errors.push(error.message));
-    page.on('console', message => {
-      if (message.type() === 'error') errors.push(message.text());
-    });
-    page.on('requestfailed', request => errors.push(`Request failed: ${request.url()}`));
-    page.on('response', response => {
-      if (response.status() < 400) return;
-      const party = new URL(response.url()).origin === origin ? 'own' : 'third-party';
-      errors.push(`HTTP ${response.status()} (${party}): ${response.url()}`);
-    });
-    const response = await page.goto(url, { waitUntil: 'load' });
-    if (!response || !response.ok()) errors.push('Page did not load successfully');
-    await page.evaluate(() => document.fonts.ready.then(() => undefined));
-    const overflow = await page.evaluate(() =>
-      document.documentElement.scrollWidth > document.documentElement.clientWidth);
-    if (overflow) errors.push(`Horizontal overflow at ${width}px`);
-    const { violations, incomplete, testEngine } = await new AxeBuilder({ page })
-      .options({ rules: { 'target-size': { enabled: true } } })
-      .analyze();
-    await page.screenshot({ path: `${dir}/${name}-${width}-first-viewport.png` });
-    await writeFile(`${dir}/${name}-${width}-browser.json`, JSON.stringify({
-      url: page.url(), width, axe: testEngine.version, errors, violations, incomplete
-    }, null, 2));
-    console.log(`${name} ${width}px: ${errors.length} errors, ${violations.length} axe violations, ${incomplete.length} needing review`);
-    if (errors.length || violations.length) failed = true;
-    await context.close();
-  }
-} finally {
-  await browser.close();
-}
-if (failed) process.exitCode = 1;
-```
-
-Run `node check-page.mjs https://example.com/ home "$out"` — an initial-load smoke check at two
-widths, not the matrix. HTTP errors are labelled `own` or `third-party`; judge a third-party
-failure by what the visitor loses, and give a page meant to answer 404 its own assertion.
-`@axe-core/playwright` needs a page from `browser.newContext()`; axe ships its WCAG 2.2
-`target-size` rule disabled, so the script enables it. Add the site's own assertions by accessible
-role and label — open navigation, follow the primary action, test form and search outcomes — wait
-for the real ready state on client-rendered sites, re-run axe after opening hidden content, and
-extend to your visitors' browsers. [Playwright accessibility
+`node check-page.mjs <url> [name] [report-directory]` — an initial-load smoke check at 390 and
+1440 px, not the matrix: console and request failures, horizontal overflow, axe findings with the
+WCAG 2.2 `target-size` rule enabled, a first-viewport screenshot. It exits non-zero on any error
+or axe violation. HTTP errors are labelled `own` or `third-party`; judge a third-party failure by
+what the visitor loses, and give a page meant to answer 404 its own assertion. Add the site's own
+assertions by accessible role and label — open navigation, follow the primary action, test form
+and search outcomes — wait for the real ready state on client-rendered sites, re-run axe after
+opening hidden content, and extend to your visitors' browsers. [Playwright accessibility
 testing](https://playwright.dev/docs/accessibility-testing).
 
 ### Turn a finding into a fix
@@ -520,9 +416,10 @@ Before reporting a build, confirm:
 | Draft 2 | 2026-09-18 | Adds the change loop with checks scaled to reach, the platform questions, the site notebook, the change report and the owner-input count. |
 | Draft 3 | 2026-09-18 | One place per rule: session contract, preflight, checks with failure conditions, one numbers table, one report; adds the **defects remain** status. Snippets rewritten and executed, axe `target-size` enabled, three runs the final evidence for every build. |
 | Draft 4 | 2026-09-24 | Cut by a tenth: duplicated explanation, table columns and generic remedy rows removed, no rule dropped. Worked example on the 0–100 scale. |
+| Draft 5 | 2026-09-24 | Published as a repository: the scripts moved out of the text into pinned, executable files; the guide keeps their contract. |
 
 Raise the draft number and date for substantive revisions and say here what changed. Re-execute
-every snippet you edit.
+every script you edit.
 
 ## About this guide
 

@@ -1,0 +1,19 @@
+{
+  "name": "agent-operated-websites",
+  "private": true,
+  "description": "Measurement scripts for the website quality guide for AI agents",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cityofcode-io/agent-operated-websites.git"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "lighthouse": "13.5.0",
+    "playwright": "1.63.0"
+  }
+}
